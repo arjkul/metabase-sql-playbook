@@ -234,6 +234,83 @@ ORDER BY created_at ASC
 
 ---
 
+## 07. Metabase Parameter Debugging Patterns
+
+**Business question**: Why is my Metabase card throwing a SQL compilation error, and how do I fix field filters and dynamic date parameters?
+
+This section documents two recurring Metabase-on-Snowflake debugging patterns.
+
+---
+
+### Pattern A: Field Filter Causing Compilation Error
+
+**Symptom**: `SQL compilation error: Object 'TABLE.COLUMN' does not exist` when using a field filter widget (`{{field_name}}`).
+
+**Root cause**: Field filters map to a physical table column. If the column is derived from a CTE (not a real table), Metabase fails to resolve it.
+
+**Fix**: Replace with optional plain parameter syntax:
+
+```sql
+-- ❌ Field filter — breaks with CTE-derived columns
+WHERE sn.SUBMIT_DATE = {{sn.SUBMIT_DATE}}
+
+-- ✅ Optional plain parameter
+WHERE 1=1
+  [[AND sn.SUBMIT_DATE >= {{start_date}}]]
+  [[AND sn.SUBMIT_DATE <  {{end_date}}]]
+```
+
+---
+
+### Pattern B: Dynamic Lookback Window with DATEADD
+
+**Metabase parameter type**: `Number`
+
+```sql
+-- ❌ MySQL syntax — does not work in Snowflake
+WHERE submit_date >= DATEDIFF('day', {{Days_Old}}, CURRENT_TIMESTAMP())
+
+-- ✅ Snowflake syntax
+WHERE sn.SUBMIT_DATE >= DATEADD('day', -{{Days_Old}}, CURRENT_TIMESTAMP())
+```
+
+**Full example — order processing events with dynamic lookback:**
+
+```sql
+WITH processing_events AS (
+    SELECT
+        order_id,
+        submit_date,
+        previous_submit_date,
+        warehouse_id,
+        queue_name,
+        changed_by_user_id
+    FROM SHIPMONK_BINLOG.BDM.ORDER_PROCESSING_EVENTS
+    WHERE
+        event_type = 'processing'
+        AND submit_date >= DATEADD('day', -{{Days_Old}}, CURRENT_TIMESTAMP())
+),
+user_roles AS (
+    SELECT user_id, role_name
+    FROM ANALYTICS.BDM.USER_ROLES
+    WHERE active = 1
+)
+SELECT
+    pe.order_id,
+    pe.submit_date,
+    pe.queue_name,
+    ur.role_name AS changed_by_role,
+    w.warehouse_name
+FROM processing_events pe
+LEFT JOIN user_roles ur ON pe.changed_by_user_id = ur.user_id
+JOIN SHIPMONK_BINLOG.BDM.WAREHOUSES w ON pe.warehouse_id = w.warehouse_id
+ORDER BY pe.submit_date DESC
+```
+
+**Metabase setup**: Parameter name `Days_Old`, type `Number`, default `14`.
+
+---
+
 ## Usage Notes
 
 - All Snowflake queries use the `SHIPMONK_BINLOG.BDM` schema path for cross-database references
